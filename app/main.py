@@ -19,6 +19,7 @@ from .database import (
     upsert_tenders,
 )
 from .scoring import score_tender
+from .segments import detect_certifications, detect_segments
 from .tenderned import discover_it_tenders, fetch_detail
 
 logging.basicConfig(level=logging.INFO)
@@ -62,6 +63,8 @@ class TenderSummary(BaseModel):
     relevance_score: int = 0
     relevance_level: str = "laag"
     matched_keywords: List[str] = []
+    segments: List[str] = []
+    certifications: List[Dict] = []
     link: Optional[str] = None
 
 
@@ -112,6 +115,9 @@ def _format_tender(raw: dict) -> TenderSummary:
     if isinstance(link, dict):
         link = link.get("href", "")
 
+    segments = detect_segments(naam, beschrijving, cpv_codes)
+    certifications = detect_certifications(naam, beschrijving)
+
     return TenderSummary(
         publicatie_id=str(raw.get("publicatieId", "")),
         naam=naam,
@@ -127,6 +133,8 @@ def _format_tender(raw: dict) -> TenderSummary:
         relevance_score=scoring["score"],
         relevance_level=scoring["level"],
         matched_keywords=scoring["matched_keywords"],
+        segments=segments,
+        certifications=certifications,
         link=link,
     )
 
@@ -275,19 +283,34 @@ async def dashboard():
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f5f7fa; color: #1a1a2e; line-height: 1.5; }
-  .container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  .container { max-width: 1440px; margin: 0 auto; padding: 24px; }
   header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
   header h1 { font-size: 1.6rem; font-weight: 700; color: #0f172a; }
   header h1 span { color: #3b82f6; }
   .header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .meta { font-size: 0.82rem; color: #64748b; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; white-space: nowrap; }
   .badge-hoog  { background: #dcfce7; color: #166534; }
   .badge-midden { background: #fff7ed; color: #9a3412; }
   .badge-laag  { background: #f1f5f9; color: #64748b; }
-  .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-  .controls label { font-size: 0.85rem; font-weight: 500; color: #475569; }
-  select, input[type="text"] { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; background: #fff; color: #1e293b; }
+  /* Segment badge colors */
+  .seg-werkplek { background: #dbeafe; color: #1e40af; }
+  .seg-cloud { background: #ede9fe; color: #5b21b6; }
+  .seg-cyber { background: #fee2e2; color: #991b1b; }
+  .seg-netwerk { background: #ccfbf1; color: #115e59; }
+  .seg-applicatie { background: #ffedd5; color: #9a3412; }
+  .seg-data { background: #d1fae5; color: #065f46; }
+  .seg-fullservice { background: #fef3c7; color: #92400e; }
+  /* Certification badge colors */
+  .cert-security { background: #fee2e2; color: #991b1b; }
+  .cert-quality { background: #dbeafe; color: #1e40af; }
+  .cert-social { background: #d1fae5; color: #065f46; }
+  .cert-other { background: #f1f5f9; color: #475569; }
+  .cert-implied { opacity: 0.65; font-style: italic; }
+  .cert-nb { color: #c0c7d0; font-size: 0.78rem; cursor: help; }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .controls label { font-size: 0.82rem; font-weight: 500; color: #475569; }
+  select, input[type="text"] { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.82rem; background: #fff; color: #1e293b; }
   select:focus, input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,.15); }
   button { padding: 8px 18px; border: none; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: background .15s; }
   .btn-primary { background: #3b82f6; color: #fff; }
@@ -300,17 +323,18 @@ async def dashboard():
   .stat-hoog .num  { color: #16a34a; }
   .stat-midden .num { color: #ea580c; }
   .stat-laag .num  { color: #94a3b8; }
+  .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
   thead { background: #f8fafc; }
-  th { padding: 10px 14px; text-align: left; font-size: 0.78rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .04em; border-bottom: 2px solid #e2e8f0; white-space: nowrap; }
-  td { padding: 10px 14px; font-size: 0.88rem; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+  th { padding: 10px 12px; text-align: left; font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .04em; border-bottom: 2px solid #e2e8f0; white-space: nowrap; }
+  td { padding: 10px 12px; font-size: 0.85rem; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
   tr:last-child td { border-bottom: none; }
   tr.row-hoog  { border-left: 3px solid #22c55e; }
   tr.row-midden { border-left: 3px solid #f97316; }
   tr.row-laag  { border-left: 3px solid #cbd5e1; }
   tr:hover { background: #f8fafc; }
-  .tender-naam { font-weight: 500; color: #0f172a; max-width: 380px; }
-  .tender-opdrachtgever { color: #475569; max-width: 200px; }
+  .tender-naam { font-weight: 500; color: #0f172a; max-width: 320px; }
+  .tender-opdrachtgever { color: #475569; max-width: 180px; }
   .score-bar { display: flex; align-items: center; gap: 6px; }
   .score-fill { height: 6px; border-radius: 3px; }
   .score-hoog  .score-fill { background: #22c55e; }
@@ -324,13 +348,14 @@ async def dashboard():
   @keyframes spin { to { transform: rotate(360deg); } }
   .toast { position: fixed; bottom: 24px; right: 24px; background: #0f172a; color: #fff; padding: 12px 20px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transform: translateY(10px); transition: all .3s; z-index: 99; }
   .toast.show { opacity: 1; transform: translateY(0); }
-  .keywords { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .kw { background: #eff6ff; color: #1d4ed8; padding: 1px 7px; border-radius: 4px; font-size: 0.72rem; }
+  .tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+  .kw { background: #eff6ff; color: #1d4ed8; padding: 1px 7px; border-radius: 4px; font-size: 0.7rem; }
+  .certs { display: flex; flex-wrap: wrap; gap: 3px; }
   @media (max-width: 768px) {
     .container { padding: 12px; }
     header { flex-direction: column; align-items: flex-start; }
-    table { font-size: 0.8rem; }
-    td, th { padding: 8px 10px; }
+    table { font-size: 0.78rem; }
+    td, th { padding: 8px 8px; }
     .tender-naam, .tender-opdrachtgever { max-width: none; }
   }
 </style>
@@ -363,6 +388,31 @@ async def dashboard():
       <option value="hoog,midden" selected>Hoog + Midden</option>
       <option value="laag">Laag</option>
     </select>
+    <label for="filterSegment">Segment:</label>
+    <select id="filterSegment" onchange="renderTable()">
+      <option value="">Alle segmenten</option>
+      <option value="Werkplek">Werkplek</option>
+      <option value="Cloud">Cloud & Hosting</option>
+      <option value="Cyber">Cybersecurity</option>
+      <option value="Netwerk">Netwerk</option>
+      <option value="Applicatie">Applicatiebeheer</option>
+      <option value="Data">Data & BI</option>
+      <option value="Full-service">Full-service</option>
+    </select>
+    <label for="filterCert">Vereiste:</label>
+    <select id="filterCert" onchange="renderTable()">
+      <option value="">Alle vereisten</option>
+      <option value="ISO 27001">ISO 27001</option>
+      <option value="ISO 9001">ISO 9001</option>
+      <option value="NEN 7510">NEN 7510</option>
+      <option value="BIO">BIO</option>
+      <option value="DigiD">DigiD</option>
+      <option value="ISAE 3402">ISAE 3402</option>
+      <option value="SOC 2">SOC 2</option>
+      <option value="NIS2">NIS2</option>
+      <option value="PSO">PSO</option>
+      <option value="SROI">SROI</option>
+    </select>
     <label for="filterType">Type:</label>
     <select id="filterType" onchange="renderTable()">
       <option value="">Alle typen</option>
@@ -370,30 +420,48 @@ async def dashboard():
       <option value="Leveringen">Leveringen</option>
       <option value="Werken">Werken</option>
     </select>
-    <input type="text" id="searchBox" placeholder="Zoek op naam of opdrachtgever..." oninput="renderTable()" style="min-width:220px;">
+    <input type="text" id="searchBox" placeholder="Zoek..." oninput="renderTable()" style="min-width:160px;">
     <span class="meta" id="resultCount"></span>
   </div>
 
+  <div class="table-wrap">
   <table>
     <thead>
       <tr>
         <th>Naam</th>
+        <th>Segmenten</th>
         <th>Opdrachtgever</th>
         <th>Score</th>
+        <th>Vereisten</th>
         <th>Type</th>
         <th>Sluitingsdatum</th>
-        <th>TenderNed</th>
+        <th>Link</th>
       </tr>
     </thead>
     <tbody id="tenderBody">
-      <tr><td colspan="6" class="empty">Tenders laden...</td></tr>
+      <tr><td colspan="8" class="empty">Tenders laden...</td></tr>
     </tbody>
   </table>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
+const SEG_CSS = {
+  'Werkplek': 'seg-werkplek', 'Cloud': 'seg-cloud', 'Cyber': 'seg-cyber',
+  'Netwerk': 'seg-netwerk', 'Applicatie': 'seg-applicatie',
+  'Data': 'seg-data', 'Full-service': 'seg-fullservice'
+};
+const CERT_CSS = { security: 'cert-security', quality: 'cert-quality', social: 'cert-social', other: 'cert-other' };
+
+function segClass(label) {
+  for (const [key, cls] of Object.entries(SEG_CSS)) {
+    if (label.toLowerCase().includes(key.toLowerCase())) return cls;
+  }
+  return 'seg-fullservice';
+}
+
 let allTenders = [];
 
 async function loadTenders() {
@@ -408,7 +476,7 @@ async function loadTenders() {
       'Laatste update: ' + new Date().toLocaleString('nl-NL');
   } catch (e) {
     document.getElementById('tenderBody').innerHTML =
-      '<tr><td colspan="6" class="empty">Fout bij laden: ' + e.message + '</td></tr>';
+      '<tr><td colspan="8" class="empty">Fout bij laden: ' + e.message + '</td></tr>';
   }
 }
 
@@ -440,6 +508,8 @@ function isOpen(t) {
 function renderTable() {
   const statusFilter = document.getElementById('filterStatus').value;
   const levelFilter = document.getElementById('filterLevel').value;
+  const segFilter = document.getElementById('filterSegment').value;
+  const certFilter = document.getElementById('filterCert').value;
   const typeFilter = document.getElementById('filterType').value;
   const search = document.getElementById('searchBox').value.toLowerCase();
   const levels = levelFilter ? levelFilter.split(',') : [];
@@ -449,6 +519,8 @@ function renderTable() {
     if (statusFilter === 'marktconsultatie' && !isMarktconsultatie(t)) return false;
     if (statusFilter === 'gegund' && !isGegund(t)) return false;
     if (levels.length && !levels.includes(t.relevance_level)) return false;
+    if (segFilter && !(t.segments || []).some(s => s.toLowerCase().includes(segFilter.toLowerCase()))) return false;
+    if (certFilter && !(t.certifications || []).some(c => c.name === certFilter)) return false;
     if (typeFilter && (!t.type_opdracht || !t.type_opdracht.toLowerCase().includes(typeFilter.toLowerCase()))) return false;
     if (search && !t.naam.toLowerCase().includes(search) && !t.opdrachtgever.toLowerCase().includes(search)) return false;
     return true;
@@ -458,26 +530,30 @@ function renderTable() {
 
   if (filtered.length === 0) {
     document.getElementById('tenderBody').innerHTML =
-      '<tr><td colspan="6" class="empty">Geen tenders gevonden voor dit filter.</td></tr>';
+      '<tr><td colspan="8" class="empty">Geen tenders gevonden voor dit filter.</td></tr>';
     return;
   }
 
   const rows = filtered.map(t => {
     const lvl = t.relevance_level || 'laag';
     const score = t.relevance_score || 0;
-    const datum = t.sluitings_datum ? new Date(t.sluitings_datum).toLocaleDateString('nl-NL') : '—';
+    const datum = t.sluitings_datum ? new Date(t.sluitings_datum).toLocaleDateString('nl-NL') : '\\u2014';
     const link = t.link
       ? '<a class="link-ext" href="' + escHtml(t.link) + '" target="_blank" rel="noopener">Bekijk &#8599;</a>'
-      : '—';
-    const kws = (t.matched_keywords || []).slice(0, 5).map(k => '<span class="kw">' + escHtml(k) + '</span>').join('');
+      : '\\u2014';
+    const segs = (t.segments || []).map(s => '<span class="badge ' + segClass(s) + '">' + escHtml(s) + '</span>').join(' ');
+    const certs = (t.certifications || []).map(c => '<span class="badge ' + (CERT_CSS[c.category] || 'cert-other') + (c.implied ? ' cert-implied' : '') + '">' + escHtml(c.name) + '</span>').join(' ');
+    const kws = (t.matched_keywords || []).slice(0, 4).map(k => '<span class="kw">' + escHtml(k) + '</span>').join('');
     return '<tr class="row-' + lvl + '">' +
-      '<td><div class="tender-naam">' + escHtml(t.naam) + '</div>' + (kws ? '<div class="keywords">' + kws + '</div>' : '') + '</td>' +
+      '<td><div class="tender-naam">' + escHtml(t.naam) + '</div>' + (kws ? '<div class="tags">' + kws + '</div>' : '') + '</td>' +
+      '<td><div class="tags">' + (segs || '\\u2014') + '</div></td>' +
       '<td class="tender-opdrachtgever">' + escHtml(t.opdrachtgever) + '</td>' +
       '<td><div class="score-bar score-' + lvl + '">' +
         '<span class="score-num">' + score + '</span>' +
         '<div class="score-fill" style="width:' + score + 'px;"></div>' +
       '</div><span class="badge badge-' + lvl + '">' + lvl + '</span></td>' +
-      '<td>' + escHtml(t.type_opdracht || '—') + '</td>' +
+      '<td><div class="certs">' + (certs || '<span class="cert-nb" title="Certificeringen staan meestal in de aanbestedingsdocumenten. Check de stukken op TenderNed.">n.b.</span>') + '</div></td>' +
+      '<td>' + escHtml(t.type_opdracht || '\\u2014') + '</td>' +
       '<td>' + datum + '</td>' +
       '<td>' + link + '</td>' +
       '</tr>';
@@ -492,7 +568,7 @@ async function doRefresh() {
   try {
     const res = await fetch('/api/v1/refresh', { method: 'POST' });
     const data = await res.json();
-    showToast('Refresh voltooid — ' + data.refreshed_tenders + ' tenders bijgewerkt');
+    showToast('Refresh voltooid \\u2014 ' + data.refreshed_tenders + ' tenders bijgewerkt');
     await loadTenders();
   } catch (e) {
     showToast('Refresh mislukt: ' + e.message);
