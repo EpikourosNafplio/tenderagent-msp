@@ -89,9 +89,9 @@ def client():
 def test_root(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["app"] == "TenderAgent MSP"
-    assert "/api/v1/discover" in data["endpoints"]
+    assert "text/html" in resp.headers["content-type"]
+    assert "TenderAgent" in resp.text
+    assert "/api/v1/tenders" in resp.text
 
 
 # ── CPV codes endpoint ──────────────────────────────────────────────────
