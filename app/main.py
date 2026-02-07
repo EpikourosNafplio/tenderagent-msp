@@ -23,6 +23,8 @@ from .segments import (
     classify_opdrachtgever,
     detect_certifications,
     detect_segments,
+    detect_signals,
+    estimate_value,
     get_expected_requirements,
     score_msp_fit,
 )
@@ -75,6 +77,8 @@ class TenderSummary(BaseModel):
     expected_requirements: List[Dict] = []
     msp_fit_score: int = 0
     msp_fit_level: str = "Niet MSP"
+    geschatte_waarde: Optional[Dict] = None
+    signalen: List[Dict] = []
     link: Optional[str] = None
 
 
@@ -131,6 +135,12 @@ def _format_tender(raw: dict) -> TenderSummary:
     og_type = classify_opdrachtgever(opdrachtgever_naam)
     expected_reqs = get_expected_requirements(opdrachtgever_naam, segments)
     msp_fit = score_msp_fit(naam, beschrijving, type_opr, og_type, segments)
+    europees = raw.get("europees", False)
+    geschatte_waarde = estimate_value(europees, type_opr, og_type, segments, naam, beschrijving)
+    signalen = detect_signals(
+        naam, beschrijving, opdrachtgever_naam, og_type, type_opr,
+        europees, segments, certifications, expected_reqs, geschatte_waarde,
+    )
 
     return TenderSummary(
         publicatie_id=str(raw.get("publicatieId", "")),
@@ -142,7 +152,7 @@ def _format_tender(raw: dict) -> TenderSummary:
         type_opdracht=type_opr,
         procedure=procedure,
         beschrijving=beschrijving,
-        europees=raw.get("europees", False),
+        europees=europees,
         cpv_codes=raw.get("cpvCodes", []),
         relevance_score=scoring["score"],
         relevance_level=scoring["level"],
@@ -153,6 +163,8 @@ def _format_tender(raw: dict) -> TenderSummary:
         expected_requirements=expected_reqs,
         msp_fit_score=msp_fit["score"],
         msp_fit_level=msp_fit["level"],
+        geschatte_waarde=geschatte_waarde,
+        signalen=signalen,
         link=link,
     )
 
@@ -378,6 +390,17 @@ async def dashboard():
   .tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
   .kw { background: #eff6ff; color: #1d4ed8; padding: 1px 7px; border-radius: 4px; font-size: 0.7rem; }
   .certs { display: flex; flex-wrap: wrap; gap: 3px; }
+  /* Value estimation */
+  .waarde { font-weight: 600; font-size: 0.82rem; white-space: nowrap; }
+  .conf-hoog { color: #166534; }
+  .conf-midden { color: #9a3412; }
+  .conf-laag { color: #94a3b8; }
+  /* Signal icons */
+  .signal { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; cursor: help; margin: 1px 0; }
+  .signal-warning { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+  .signal-puzzle { background: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe; }
+  .signal-check { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+  .signals { display: flex; flex-direction: column; gap: 2px; }
   @media (max-width: 768px) {
     .container { padding: 12px; }
     header { flex-direction: column; align-items: flex-start; }
@@ -449,6 +472,14 @@ async def dashboard():
       <option value="Leveringen">Leveringen</option>
       <option value="Werken">Werken</option>
     </select>
+    <label for="filterSignaal">Signalen:</label>
+    <select id="filterSignaal" onchange="renderTable()">
+      <option value="">Alle</option>
+      <option value="any">Alleen met signalen</option>
+      <option value="msp-kans">MSP-kansen</option>
+      <option value="disproportioneel">Disproportioneel</option>
+      <option value="opvallend">Opvallend</option>
+    </select>
     <input type="text" id="searchBox" placeholder="Zoek..." oninput="renderTable()" style="min-width:160px;">
     <button class="sort-toggle" id="sortToggle" onclick="toggleSort()">Sorteer: MSP-fit</button>
     <span class="meta" id="resultCount"></span>
@@ -463,6 +494,8 @@ async def dashboard():
         <th>Opdrachtgever</th>
         <th>MSP-fit</th>
         <th>Score</th>
+        <th>Waarde</th>
+        <th>Signalen</th>
         <th>Vereisten <span class="req-info" title="Verwachte vereisten op basis van opdrachtgevertype en regelgeving. Check altijd de aanbestedingsstukken voor de definitieve eisen.">i</span></th>
         <th>Type</th>
         <th>Sluitingsdatum</th>
@@ -470,7 +503,7 @@ async def dashboard():
       </tr>
     </thead>
     <tbody id="tenderBody">
-      <tr><td colspan="9" class="empty">Tenders laden...</td></tr>
+      <tr><td colspan="11" class="empty">Tenders laden...</td></tr>
     </tbody>
   </table>
   </div>
@@ -500,21 +533,44 @@ function segClass(label) {
 }
 
 let allTenders = [];
-let sortByMspFit = true;
+let sortMode = 0; // 0=MSP-fit, 1=Relevantie, 2=Waarde
+const SORT_LABELS = ['Sorteer: MSP-fit', 'Sorteer: Relevantie', 'Sorteer: Waarde'];
+
+function getMaxValue(t) {
+  return (t.geschatte_waarde && t.geschatte_waarde.max_value) || 0;
+}
 
 function sortTenders() {
-  if (sortByMspFit) {
+  if (sortMode === 0) {
     allTenders.sort((a, b) => b.msp_fit_score - a.msp_fit_score || b.relevance_score - a.relevance_score);
-  } else {
+  } else if (sortMode === 1) {
     allTenders.sort((a, b) => b.relevance_score - a.relevance_score || b.msp_fit_score - a.msp_fit_score);
+  } else {
+    allTenders.sort((a, b) => getMaxValue(b) - getMaxValue(a) || b.msp_fit_score - a.msp_fit_score);
   }
 }
 
 function toggleSort() {
-  sortByMspFit = !sortByMspFit;
-  document.getElementById('sortToggle').textContent = sortByMspFit ? 'Sorteer: MSP-fit' : 'Sorteer: Relevantie';
+  sortMode = (sortMode + 1) % 3;
+  document.getElementById('sortToggle').textContent = SORT_LABELS[sortMode];
   sortTenders();
   renderTable();
+}
+
+function renderWaarde(gw) {
+  if (!gw || !gw.display) return '\\u2014';
+  var conf = gw.confidence || 'laag';
+  return '<span class="waarde conf-' + conf + '" title="Schatting (betrouwbaarheid: ' + conf + ')">' + escHtml(gw.display) + '</span>';
+}
+
+function renderSignalen(signalen) {
+  if (!signalen || !signalen.length) return '';
+  var ICON_MAP = { warning: '\\u26a0\\ufe0f', puzzle: '\\ud83e\\udde9', check: '\\u2705' };
+  return '<div class="signals">' + signalen.map(function(s) {
+    var iconCls = 'signal-' + s.icon;
+    var icon = ICON_MAP[s.icon] || '';
+    return '<span class="signal ' + iconCls + '" title="' + escHtml(s.detail) + '">' + icon + ' ' + escHtml(s.label) + '</span>';
+  }).join('') + '</div>';
 }
 
 async function loadTenders() {
@@ -529,7 +585,7 @@ async function loadTenders() {
       'Laatste update: ' + new Date().toLocaleString('nl-NL');
   } catch (e) {
     document.getElementById('tenderBody').innerHTML =
-      '<tr><td colspan="9" class="empty">Fout bij laden: ' + e.message + '</td></tr>';
+      '<tr><td colspan="11" class="empty">Fout bij laden: ' + e.message + '</td></tr>';
   }
 }
 
@@ -564,6 +620,7 @@ function renderTable() {
   const segFilter = document.getElementById('filterSegment').value;
   const certFilter = document.getElementById('filterCert').value;
   const typeFilter = document.getElementById('filterType').value;
+  const signaalFilter = document.getElementById('filterSignaal').value;
   const search = document.getElementById('searchBox').value.toLowerCase();
   const levels = levelFilter ? levelFilter.split(',') : [];
 
@@ -579,6 +636,11 @@ function renderTable() {
       if (!hasCert && !hasExpected) return false;
     }
     if (typeFilter && (!t.type_opdracht || !t.type_opdracht.toLowerCase().includes(typeFilter.toLowerCase()))) return false;
+    if (signaalFilter) {
+      const sigs = t.signalen || [];
+      if (signaalFilter === 'any' && sigs.length === 0) return false;
+      if (signaalFilter !== 'any' && !sigs.some(s => s.type === signaalFilter)) return false;
+    }
     if (search && !t.naam.toLowerCase().includes(search) && !t.opdrachtgever.toLowerCase().includes(search)) return false;
     return true;
   });
@@ -587,7 +649,7 @@ function renderTable() {
 
   if (filtered.length === 0) {
     document.getElementById('tenderBody').innerHTML =
-      '<tr><td colspan="9" class="empty">Geen tenders gevonden voor dit filter.</td></tr>';
+      '<tr><td colspan="11" class="empty">Geen tenders gevonden voor dit filter.</td></tr>';
     return;
   }
 
@@ -612,6 +674,8 @@ function renderTable() {
         '<span class="score-num">' + score + '</span>' +
         '<div class="score-fill" style="width:' + score + 'px;"></div>' +
       '</div><span class="badge badge-' + lvl + '">' + lvl + '</span></td>' +
+      '<td>' + renderWaarde(t.geschatte_waarde) + '</td>' +
+      '<td>' + renderSignalen(t.signalen) + '</td>' +
       '<td><div class="certs">' + (certs || '') + '</div></td>' +
       '<td>' + escHtml(t.type_opdracht || '\\u2014') + '</td>' +
       '<td>' + datum + '</td>' +

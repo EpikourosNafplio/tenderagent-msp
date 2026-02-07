@@ -407,6 +407,279 @@ def get_expected_requirements(
     return list(result.values())
 
 
+# ── Value Estimation ─────────────────────────────────────────────────────
+
+EU_THRESHOLD_DIENSTEN = 221_000
+EU_THRESHOLD_WERKEN = 5_538_000
+
+# (opdrachtgever_type, segment_category) → (min, max)
+# segment_category is derived from segment labels
+_SEGMENT_CATEGORIES = {
+    "Werkplek & Eindgebruikersbeheer": "infra",
+    "Cloud & Hosting": "infra",
+    "Netwerk & Connectiviteit": "infra",
+    "Cybersecurity": "infra",
+    "Applicatiebeheer": "applicatie",
+    "Data & BI": "applicatie",
+    "Full-service": "infra",
+}
+
+_VALUE_MATRIX: Dict[tuple, tuple] = {
+    ("GEMEENTE", "infra"): (200_000, 1_000_000),
+    ("GEMEENTE", "applicatie"): (100_000, 500_000),
+    ("GR", "infra"): (300_000, 2_000_000),
+    ("GR", "applicatie"): (300_000, 2_000_000),
+    ("PROVINCIE", "infra"): (300_000, 2_000_000),
+    ("PROVINCIE", "applicatie"): (300_000, 2_000_000),
+    ("WATERSCHAP", "infra"): (200_000, 1_000_000),
+    ("WATERSCHAP", "applicatie"): (200_000, 1_000_000),
+    ("RIJK", "infra"): (500_000, 5_000_000),
+    ("RIJK", "applicatie"): (500_000, 5_000_000),
+    ("ZBO", "infra"): (500_000, 5_000_000),
+    ("ZBO", "applicatie"): (500_000, 5_000_000),
+    ("RIJK_VITAAL", "infra"): (500_000, 5_000_000),
+    ("RIJK_VITAAL", "applicatie"): (500_000, 5_000_000),
+    ("ONDERWIJS", "infra"): (50_000, 300_000),
+    ("ONDERWIJS", "applicatie"): (50_000, 300_000),
+    ("PUBLIEK_SOCIAAL", "infra"): (50_000, 300_000),
+    ("PUBLIEK_SOCIAAL", "applicatie"): (50_000, 300_000),
+    ("ZORG", "infra"): (100_000, 1_000_000),
+    ("ZORG", "applicatie"): (100_000, 1_000_000),
+}
+
+
+def _format_eur(val: int) -> str:
+    """Format integer value as '200K', '1M', '5.5M' etc."""
+    if val >= 1_000_000:
+        m = val / 1_000_000
+        if m == int(m):
+            return f"{int(m)}M"
+        return f"{m:.1f}M".replace(".0M", "M")
+    if val >= 1_000:
+        k = val / 1_000
+        if k == int(k):
+            return f"{int(k)}K"
+        return f"{k:.0f}K"
+    return str(val)
+
+
+def estimate_value(
+    europees: bool,
+    type_opdracht: str,
+    opdrachtgever_type: str,
+    segments: List[str],
+    naam: str,
+    beschrijving: str,
+) -> Dict:
+    """Estimate the monetary value range of a tender heuristically.
+
+    Returns dict with keys: min_value, max_value, display, confidence.
+    """
+    # Determine segment categories present
+    seg_cats = set()
+    for seg in segments:
+        cat = _SEGMENT_CATEGORIES.get(seg)
+        if cat:
+            seg_cats.add(cat)
+
+    if not seg_cats and opdrachtgever_type == "OVERIG":
+        return {"min_value": None, "max_value": None, "display": "?", "confidence": "laag"}
+
+    # Collect ranges from matrix
+    min_vals = []
+    max_vals = []
+    for cat in (seg_cats or ["infra"]):  # default to infra if no segments
+        key = (opdrachtgever_type, cat)
+        if key in _VALUE_MATRIX:
+            lo, hi = _VALUE_MATRIX[key]
+            min_vals.append(lo)
+            max_vals.append(hi)
+
+    if not min_vals:
+        # Unknown opdrachtgever_type with segments — use a generic range
+        return {"min_value": None, "max_value": None, "display": "?", "confidence": "laag"}
+
+    # Broadest range: min of mins, max of maxes
+    est_min = min(min_vals)
+    est_max = max(max_vals)
+
+    # EU floor: if europees=True, minimum is at least the EU threshold
+    if europees:
+        type_lower = (type_opdracht or "").lower()
+        if "werken" in type_lower:
+            eu_floor = EU_THRESHOLD_WERKEN
+        else:
+            eu_floor = EU_THRESHOLD_DIENSTEN
+        est_min = max(est_min, eu_floor)
+        if est_max < est_min:
+            est_max = est_min * 3  # EU tender likely much larger
+
+    # Confidence level
+    if europees and seg_cats:
+        confidence = "hoog"
+    elif seg_cats:
+        confidence = "midden"
+    else:
+        confidence = "laag"
+
+    display = f"\u20ac{_format_eur(est_min)}-{_format_eur(est_max)}"
+    return {
+        "min_value": est_min,
+        "max_value": est_max,
+        "display": display,
+        "confidence": confidence,
+    }
+
+
+# ── Signal Detection ─────────────────────────────────────────────────────
+
+_DIENST_KEYWORDS = ["beheer", "onderhoud", "managed", "hosting", "monitoring"]
+_TRANSITIE_KEYWORDS = [
+    "huidige leverancier", "transitie", "huidige dienstverlener",
+    "huidige omgeving", "huidige partij", "huidige contractant",
+    "overname van", "overdracht",
+]
+_SYSTEM_CATEGORIES = {
+    "salaris": ["salaris", "loon"],
+    "hrm": ["hrm", "e-hrm", "personeels"],
+    "klantvolg": ["klantvolg", "crm", "relatiebeheersysteem"],
+    "erp": ["erp", "financieel systeem", "financieel pakket"],
+    "zaak": ["zaaksysteem", "zaakgericht"],
+    "dms": ["dms", "document management", "documentbeheer"],
+}
+_INFRA_SEGMENTS = {"Werkplek & Eindgebruikersbeheer", "Cloud & Hosting", "Netwerk & Connectiviteit"}
+_HEAVY_REQUIREMENTS = {"verplicht", "waarschijnlijk"}
+
+
+def _is_small_opdrachtgever(opdrachtgever: str, opdrachtgever_type: str) -> bool:
+    """Check if opdrachtgever is a small organisation."""
+    if opdrachtgever_type in ("ONDERWIJS", "PUBLIEK_SOCIAAL"):
+        return True
+    if opdrachtgever.lower().startswith("stichting"):
+        return True
+    return False
+
+
+def _count_distinct_systems(text: str) -> int:
+    """Count how many distinct system categories are mentioned."""
+    text_lower = text.lower()
+    count = 0
+    for _cat, keywords in _SYSTEM_CATEGORIES.items():
+        for kw in keywords:
+            if kw in text_lower:
+                count += 1
+                break
+    return count
+
+
+def detect_signals(
+    naam: str,
+    beschrijving: str,
+    opdrachtgever: str,
+    opdrachtgever_type: str,
+    type_opdracht: str,
+    europees: bool,
+    segments: List[str],
+    certifications: List[Dict],
+    expected_requirements: List[Dict],
+    estimated_value: Dict,
+) -> List[Dict]:
+    """Detect noteworthy signals in a tender.
+
+    Returns list of dicts with keys: type, icon, label, detail.
+    """
+    signals: List[Dict] = []
+    text = f"{naam} {beschrijving}"
+    text_lower = text.lower()
+
+    # ── DISPROPORTIONEEL ──
+
+    # D1: Small opdrachtgever + 3+ heavy requirements
+    if _is_small_opdrachtgever(opdrachtgever, opdrachtgever_type):
+        heavy_count = sum(
+            1 for r in expected_requirements if r.get("level") in _HEAVY_REQUIREMENTS
+        )
+        if heavy_count >= 3:
+            signals.append({
+                "type": "disproportioneel",
+                "icon": "warning",
+                "label": "Zware eisen voor kleine opdrachtgever",
+                "detail": f"{heavy_count} zware vereisten bij {opdrachtgever_type}",
+            })
+
+    # D2: Low max value + broad scope
+    max_val = estimated_value.get("max_value")
+    if max_val is not None and max_val <= 300_000:
+        n_segments = len([s for s in segments if s != "Full-service"])
+        n_systems = _count_distinct_systems(text)
+        if n_segments >= 3 or n_systems >= 3:
+            signals.append({
+                "type": "disproportioneel",
+                "icon": "warning",
+                "label": "Brede scope voor beperkt budget",
+                "detail": f"{n_segments} segmenten, {n_systems} systemen, max \u20ac{_format_eur(max_val)}",
+            })
+
+    # D3: Type=Leveringen but description has service characteristics
+    type_lower = (type_opdracht or "").lower()
+    if "leveringen" in type_lower:
+        dienst_found = [kw for kw in _DIENST_KEYWORDS if kw in text_lower]
+        if dienst_found:
+            signals.append({
+                "type": "disproportioneel",
+                "icon": "warning",
+                "label": "Levering of dienst?",
+                "detail": f"Type is Leveringen maar beschrijving bevat: {', '.join(dienst_found)}",
+            })
+
+    # ── OPVALLEND ──
+
+    # O1: GR or gemeenschappelijke regeling
+    if opdrachtgever_type == "GR" or "gemeenschappelijke regeling" in text_lower:
+        signals.append({
+            "type": "opvallend",
+            "icon": "puzzle",
+            "label": "Meerdere organisaties, een contract",
+            "detail": "Gemeenschappelijke regeling \u2014 meerdere deelnemende organisaties",
+        })
+
+    # O2: Werkplek + Cybersecurity together
+    seg_set = set(segments)
+    if "Werkplek & Eindgebruikersbeheer" in seg_set and "Cybersecurity" in seg_set:
+        signals.append({
+            "type": "opvallend",
+            "icon": "puzzle",
+            "label": "Werkplek met security-focus",
+            "detail": "Combineert werkplekbeheer met cybersecurity",
+        })
+
+    # ── MSP-KANSEN ──
+
+    # K1: GEMEENTE + infra + diensten + ≥200K
+    if opdrachtgever_type == "GEMEENTE":
+        has_infra = bool(seg_set & _INFRA_SEGMENTS)
+        has_dienst = _text_has_any(text, _DIENST_KEYWORDS)
+        min_val = estimated_value.get("min_value")
+        if has_infra and has_dienst and min_val is not None and min_val >= 200_000:
+            signals.append({
+                "type": "msp-kans",
+                "icon": "check",
+                "label": "Sweet spot MSP",
+                "detail": "Gemeente + infra + dienstenkenmerken + \u20ac200K+",
+            })
+
+    # K2: Possible supplier switch
+    if any(kw in text_lower for kw in _TRANSITIE_KEYWORDS):
+        signals.append({
+            "type": "msp-kans",
+            "icon": "check",
+            "label": "Mogelijke leverancierswisseling",
+            "detail": "Tekst suggereert overstap van huidige leverancier",
+        })
+
+    return signals
+
+
 def detect_certifications(naam: str, beschrijving: str) -> List[Dict[str, str]]:
     """Detect certification requirements mentioned in a tender.
 
