@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -28,6 +29,7 @@ from .segments import (
     get_expected_requirements,
     score_msp_fit,
 )
+from .historie import is_historie_loaded, query_gunningshistorie, query_herhalingspatronen, query_vooraankondigingen
 from .tenderned import discover_it_tenders, fetch_detail
 
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,10 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     init_db()
     logger.info("Database initialized")
+    if is_historie_loaded():
+        logger.info("Gunningshistorie dataset loaded")
+    else:
+        logger.info("Gunningshistorie dataset not found — historie endpoints will return empty results")
     yield
 
 
@@ -46,6 +52,14 @@ app = FastAPI(
     description="Nederlandse IT-aanbestedingen discovery API voor MSP's",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -79,7 +93,37 @@ class TenderSummary(BaseModel):
     msp_fit_level: str = "Niet MSP"
     geschatte_waarde: Optional[Dict] = None
     signalen: List[Dict] = []
+    gunningshistorie: List[Dict] = []
+    waarde_bron: Optional[str] = None
     link: Optional[str] = None
+
+
+class GunningshistorieResponse(BaseModel):
+    opdrachtgever: str
+    aantal: int
+    resultaten: List[Dict]
+
+
+class Vooraankondiging(BaseModel):
+    opdrachtgever: str
+    opdrachtgever_type: str
+    beschrijving: str
+    publicatiedatum: str
+    type: str
+    cpv_codes: List[str] = []
+    segmenten: List[str] = []
+    tenderned_kenmerk: Optional[str] = None
+
+
+class Herhalingspatroon(BaseModel):
+    opdrachtgever: str
+    beschrijving_vorig: str
+    gunningsdatum_vorig: str
+    gegunde_partij: Optional[str] = None
+    geraamde_waarde: Optional[float] = None
+    verwachte_heraanbesteding: str
+    status: str
+    segmenten: List[str] = []
 
 
 class DiscoverResponse(BaseModel):
@@ -136,11 +180,14 @@ def _format_tender(raw: dict) -> TenderSummary:
     expected_reqs = get_expected_requirements(opdrachtgever_naam, segments)
     msp_fit = score_msp_fit(naam, beschrijving, type_opr, og_type, segments)
     europees = raw.get("europees", False)
-    geschatte_waarde = estimate_value(europees, type_opr, og_type, segments, naam, beschrijving)
+    geschatte_waarde = estimate_value(europees, type_opr, og_type, segments, naam, beschrijving, raw_tender=raw)
     signalen = detect_signals(
         naam, beschrijving, opdrachtgever_naam, og_type, type_opr,
         europees, segments, certifications, expected_reqs, geschatte_waarde,
+        sluitings_datum=raw.get("sluitingsDatum"),
+        msp_fit_score=msp_fit["score"],
     )
+    historie = query_gunningshistorie(opdrachtgever_naam, limit=5)
 
     return TenderSummary(
         publicatie_id=str(raw.get("publicatieId", "")),
@@ -165,6 +212,8 @@ def _format_tender(raw: dict) -> TenderSummary:
         msp_fit_level=msp_fit["level"],
         geschatte_waarde=geschatte_waarde,
         signalen=signalen,
+        gunningshistorie=historie,
+        waarde_bron=geschatte_waarde.get("waarde_bron"),
         link=link,
     )
 
@@ -223,6 +272,10 @@ async def list_tenders(
     min_score: int = Query(0, ge=0, le=100),
     level: Optional[str] = Query(None),
     type_opdracht: Optional[str] = Query(None, description="Filter: Diensten, Leveringen, Werken"),
+    alleen_signalen: bool = Query(False, description="Alleen tenders met signalen"),
+    alleen_open: bool = Query(False, description="Alleen open tenders"),
+    zoekterm: Optional[str] = Query(None, description="Vrije zoekterm"),
+    sorteer: Optional[str] = Query(None, description="Sorteer: msp_fit, relevantie, waarde, signalen"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -237,8 +290,24 @@ async def list_tenders(
         tenders = [t for t in tenders if t.relevance_level == level.lower()]
     if type_opdracht:
         tenders = [t for t in tenders if t.type_opdracht and type_opdracht.lower() in t.type_opdracht.lower()]
+    if alleen_signalen:
+        tenders = [t for t in tenders if t.signalen]
+    if alleen_open:
+        now = datetime.now(timezone.utc).isoformat()
+        tenders = [t for t in tenders if t.sluitings_datum and t.sluitings_datum >= now]
+    if zoekterm:
+        zl = zoekterm.lower()
+        tenders = [t for t in tenders if zl in t.naam.lower() or zl in (t.beschrijving or "").lower() or zl in t.opdrachtgever.lower()]
 
-    tenders.sort(key=lambda t: t.relevance_score, reverse=True)
+    if sorteer == "msp_fit":
+        tenders.sort(key=lambda t: (-t.msp_fit_score, -t.relevance_score))
+    elif sorteer == "waarde":
+        tenders.sort(key=lambda t: (-((t.geschatte_waarde or {}).get("max_value") or 0), -t.msp_fit_score))
+    elif sorteer == "signalen":
+        tenders.sort(key=lambda t: (-len(t.signalen), -t.msp_fit_score))
+    else:
+        tenders.sort(key=lambda t: t.relevance_score, reverse=True)
+
     return tenders[offset : offset + limit]
 
 
@@ -299,6 +368,66 @@ async def refresh_cache():
         "refreshed_tenders": count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.get("/api/v1/gunningshistorie/{opdrachtgever}", response_model=GunningshistorieResponse)
+async def get_gunningshistorie(opdrachtgever: str):
+    """Get gunningshistorie for a specific opdrachtgever."""
+    resultaten = query_gunningshistorie(opdrachtgever)
+    return GunningshistorieResponse(
+        opdrachtgever=opdrachtgever,
+        aantal=len(resultaten),
+        resultaten=resultaten,
+    )
+
+
+@app.get("/api/v1/herhalingspatronen", response_model=List[Herhalingspatroon])
+async def get_herhalingspatronen():
+    """Get herhalingspatronen — ICT contracts likely to be re-tendered."""
+    rows = query_herhalingspatronen()
+    result = []
+    for r in rows:
+        gd = r.get("datum_gunning", "")
+        try:
+            d = datetime.fromisoformat(gd[:10]) if gd else None
+            verwacht = f"{d.year + 3}-{d.year + 5}" if d else "onbekend"
+        except (ValueError, TypeError):
+            verwacht = "onbekend"
+        result.append(Herhalingspatroon(
+            opdrachtgever=r.get("aanbestedende_dienst", ""),
+            beschrijving_vorig=r.get("beschrijving", ""),
+            gunningsdatum_vorig=gd,
+            gegunde_partij=r.get("gegunde_ondernemer"),
+            geraamde_waarde=r.get("geraamde_waarde"),
+            verwachte_heraanbesteding=verwacht,
+            status="Verwacht",
+            segmenten=detect_segments(
+                r.get("aanbestedende_dienst", ""),
+                r.get("beschrijving", ""),
+                [],
+            ),
+        ))
+    return result
+
+
+@app.get("/api/v1/vooraankondigingen", response_model=List[Vooraankondiging])
+async def get_vooraankondigingen():
+    """Get vooraankondigingen, marktconsultaties, and vrijwillige transparantie."""
+    rows = query_vooraankondigingen()
+    result = []
+    for r in rows:
+        og_naam = r.get("aanbestedende_dienst", "")
+        result.append(Vooraankondiging(
+            opdrachtgever=og_naam,
+            opdrachtgever_type=classify_opdrachtgever(og_naam),
+            beschrijving=r.get("beschrijving", ""),
+            publicatiedatum=r.get("publicatiedatum", ""),
+            type=r.get("publicatie_soort", ""),
+            cpv_codes=[c.strip() for c in (r.get("cpv_codes") or "").split(",") if c.strip()],
+            segmenten=detect_segments(og_naam, r.get("beschrijving", ""), []),
+            tenderned_kenmerk=r.get("tenderned_kenmerk"),
+        ))
+    return result
 
 
 @app.get("/", response_class=HTMLResponse)

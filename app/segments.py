@@ -1,7 +1,8 @@
 """MSP segment labelling and certification detection for tenders."""
 
 import re
-from typing import List, Dict
+from datetime import datetime
+from typing import Dict, List, Optional
 
 # ── MSP Segments ─────────────────────────────────────────────────────────
 # Each segment has STRONG keywords (sufficient alone) and CPV codes.
@@ -470,11 +471,29 @@ def estimate_value(
     segments: List[str],
     naam: str,
     beschrijving: str,
+    raw_tender: Optional[dict] = None,
 ) -> Dict:
     """Estimate the monetary value range of a tender heuristically.
 
-    Returns dict with keys: min_value, max_value, display, confidence.
+    Returns dict with keys: min_value, max_value, display, confidence, waarde_bron.
     """
+    # Check for exact value from raw tender data
+    if raw_tender:
+        geraamd = raw_tender.get("geraamdeWaarde")
+        if not geraamd:
+            detail = raw_tender.get("aanbestedingDetail")
+            if isinstance(detail, dict):
+                geraamd = detail.get("geraamdeWaarde")
+        if isinstance(geraamd, (int, float)) and geraamd > 0:
+            val = int(geraamd)
+            return {
+                "min_value": val,
+                "max_value": val,
+                "display": f"\u20ac{_format_eur(val)}",
+                "confidence": "hoog",
+                "waarde_bron": "exact",
+            }
+
     # Determine segment categories present
     seg_cats = set()
     for seg in segments:
@@ -483,7 +502,7 @@ def estimate_value(
             seg_cats.add(cat)
 
     if not seg_cats and opdrachtgever_type == "OVERIG":
-        return {"min_value": None, "max_value": None, "display": "?", "confidence": "laag"}
+        return {"min_value": None, "max_value": None, "display": "?", "confidence": "laag", "waarde_bron": "onbekend"}
 
     # Collect ranges from matrix
     min_vals = []
@@ -497,7 +516,7 @@ def estimate_value(
 
     if not min_vals:
         # Unknown opdrachtgever_type with segments — use a generic range
-        return {"min_value": None, "max_value": None, "display": "?", "confidence": "laag"}
+        return {"min_value": None, "max_value": None, "display": "?", "confidence": "laag", "waarde_bron": "onbekend"}
 
     # Broadest range: min of mins, max of maxes
     est_min = min(min_vals)
@@ -528,6 +547,7 @@ def estimate_value(
         "max_value": est_max,
         "display": display,
         "confidence": confidence,
+        "waarde_bron": "bandbreedte",
     }
 
 
@@ -572,6 +592,11 @@ def _count_distinct_systems(text: str) -> int:
     return count
 
 
+_OVERHEID_CLOUD_TYPES = {
+    "GEMEENTE", "PROVINCIE", "WATERSCHAP", "GR", "RIJK", "ZBO", "RIJK_VITAAL",
+}
+
+
 def detect_signals(
     naam: str,
     beschrijving: str,
@@ -583,6 +608,8 @@ def detect_signals(
     certifications: List[Dict],
     expected_requirements: List[Dict],
     estimated_value: Dict,
+    sluitings_datum: Optional[str] = None,
+    msp_fit_score: int = 0,
 ) -> List[Dict]:
     """Detect noteworthy signals in a tender.
 
@@ -675,6 +702,44 @@ def detect_signals(
             "icon": "check",
             "label": "Mogelijke leverancierswisseling",
             "detail": "Tekst suggereert overstap van huidige leverancier",
+        })
+
+    # O3: Korte inschrijftermijn with complex scope
+    real_seg_count = len([s for s in segments if s != FULL_SERVICE_LABEL])
+    if real_seg_count >= 3 and sluitings_datum:
+        try:
+            deadline = datetime.fromisoformat(sluitings_datum.replace("Z", "+00:00"))
+            days_left = (deadline - datetime.now(deadline.tzinfo)).days
+            if days_left < 21:
+                signals.append({
+                    "type": "opvallend",
+                    "icon": "puzzle",
+                    "label": "Korte inschrijftermijn",
+                    "detail": f"{real_seg_count} segmenten maar nog {days_left} dagen tot sluiting",
+                })
+        except (ValueError, TypeError):
+            pass
+
+    # K3: Cloud bij overheid
+    type_lower = (type_opdracht or "").lower()
+    if ("Cloud & Hosting" in seg_set
+            and opdrachtgever_type in _OVERHEID_CLOUD_TYPES
+            and "diensten" in type_lower):
+        signals.append({
+            "type": "msp-kans",
+            "icon": "check",
+            "label": "Cloud bij overheid",
+            "detail": "Cloud/hosting bij overheid — groeimarkt voor MSP's",
+        })
+
+    # K4: MSP-relevant + hoge waarde
+    min_val = estimated_value.get("min_value")
+    if msp_fit_score > 20 and min_val is not None and min_val >= 500_000:
+        signals.append({
+            "type": "msp-kans",
+            "icon": "check",
+            "label": "MSP-relevant + hoge waarde",
+            "detail": f"MSP-fit score {msp_fit_score} met waarde \u2265\u20ac{_format_eur(min_val)}",
         })
 
     return signals

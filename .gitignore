@@ -4,3 +4,4 @@ cache.db
 cache.db-shm
 cache.db-wal
 .env
+data/tenderned_historie.db

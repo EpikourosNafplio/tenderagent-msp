@@ -243,3 +243,89 @@ def test_discover_response_has_metadata(client):
     assert "tender_count" in data
     assert "timestamp" in data
     assert "tenders" in data
+
+
+# ── New fields in TenderSummary ───────────────────────────────────────────
+
+def test_tender_has_gunningshistorie_field(client):
+    resp = client.get("/api/v1/tenders/100001")
+    data = resp.json()
+    assert "gunningshistorie" in data
+    assert isinstance(data["gunningshistorie"], list)
+
+
+def test_tender_has_waarde_bron_field(client):
+    resp = client.get("/api/v1/tenders/100001")
+    data = resp.json()
+    assert "waarde_bron" in data
+    assert data["waarde_bron"] in ("exact", "bandbreedte", "onbekend")
+
+
+# ── New endpoints ─────────────────────────────────────────────────────────
+
+def test_gunningshistorie_endpoint(client):
+    resp = client.get("/api/v1/gunningshistorie/Amsterdam")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["opdrachtgever"] == "Amsterdam"
+    assert "aantal" in data
+    assert "resultaten" in data
+    assert isinstance(data["resultaten"], list)
+
+
+def test_herhalingspatronen_endpoint(client):
+    resp = client.get("/api/v1/herhalingspatronen")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+
+
+def test_vooraankondigingen_endpoint(client):
+    resp = client.get("/api/v1/vooraankondigingen")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+
+
+# ── CORS headers ──────────────────────────────────────────────────────────
+
+def test_cors_headers(client):
+    resp = client.get(
+        "/api/v1/tenders",
+        headers={"Origin": "http://localhost:3000"},
+    )
+    assert resp.headers.get("access-control-allow-origin") == "*"
+
+
+# ── New query params on list_tenders ──────────────────────────────────────
+
+def test_tenders_alleen_signalen_filter(client):
+    resp = client.get("/api/v1/tenders?alleen_signalen=true")
+    assert resp.status_code == 200
+    data = resp.json()
+    for t in data:
+        assert len(t["signalen"]) > 0
+
+
+def test_tenders_zoekterm_filter(client):
+    resp = client.get("/api/v1/tenders?zoekterm=SaaS")
+    assert resp.status_code == 200
+    data = resp.json()
+    for t in data:
+        found = "saas" in t["naam"].lower() or "saas" in (t["beschrijving"] or "").lower()
+        assert found
+
+
+def test_tenders_sorteer_msp_fit(client):
+    resp = client.get("/api/v1/tenders?sorteer=msp_fit")
+    assert resp.status_code == 200
+    data = resp.json()
+    scores = [t["msp_fit_score"] for t in data]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_tenders_sorteer_waarde(client):
+    resp = client.get("/api/v1/tenders?sorteer=waarde")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
