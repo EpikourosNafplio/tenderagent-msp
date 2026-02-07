@@ -24,6 +24,7 @@ from .segments import (
     detect_certifications,
     detect_segments,
     get_expected_requirements,
+    score_msp_fit,
 )
 from .tenderned import discover_it_tenders, fetch_detail
 
@@ -72,6 +73,8 @@ class TenderSummary(BaseModel):
     certifications: List[Dict] = []
     opdrachtgever_type: str = "OVERIG"
     expected_requirements: List[Dict] = []
+    msp_fit_score: int = 0
+    msp_fit_level: str = "Niet MSP"
     link: Optional[str] = None
 
 
@@ -127,6 +130,7 @@ def _format_tender(raw: dict) -> TenderSummary:
     opdrachtgever_naam = raw.get("opdrachtgeverNaam", "")
     og_type = classify_opdrachtgever(opdrachtgever_naam)
     expected_reqs = get_expected_requirements(opdrachtgever_naam, segments)
+    msp_fit = score_msp_fit(naam, beschrijving, type_opr, og_type, segments)
 
     return TenderSummary(
         publicatie_id=str(raw.get("publicatieId", "")),
@@ -147,6 +151,8 @@ def _format_tender(raw: dict) -> TenderSummary:
         certifications=certifications,
         opdrachtgever_type=og_type,
         expected_requirements=expected_reqs,
+        msp_fit_score=msp_fit["score"],
+        msp_fit_level=msp_fit["level"],
         link=link,
     )
 
@@ -324,6 +330,11 @@ async def dashboard():
   .req-waarschijnlijk { opacity: 0.85; }
   .req-gebruikelijk, .req-mogelijk { opacity: 0.6; border: 1px solid currentColor; background: transparent !important; }
   .req-info { display: inline-block; width: 15px; height: 15px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 0.65rem; text-align: center; line-height: 15px; cursor: help; margin-left: 4px; vertical-align: middle; }
+  /* MSP-fit badges */
+  .msp-relevant { background: #dcfce7; color: #166534; }
+  .msp-mogelijk { background: #fef9c3; color: #854d0e; }
+  .msp-niet { background: #fee2e2; color: #991b1b; }
+  .sort-toggle { font-size: 0.78rem; color: #3b82f6; cursor: pointer; text-decoration: underline; background: none; border: none; padding: 0; font-weight: 500; }
   .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
   .controls label { font-size: 0.82rem; font-weight: 500; color: #475569; }
   select, input[type="text"] { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.82rem; background: #fff; color: #1e293b; }
@@ -439,6 +450,7 @@ async def dashboard():
       <option value="Werken">Werken</option>
     </select>
     <input type="text" id="searchBox" placeholder="Zoek..." oninput="renderTable()" style="min-width:160px;">
+    <button class="sort-toggle" id="sortToggle" onclick="toggleSort()">Sorteer: MSP-fit</button>
     <span class="meta" id="resultCount"></span>
   </div>
 
@@ -449,6 +461,7 @@ async def dashboard():
         <th>Naam</th>
         <th>Segmenten</th>
         <th>Opdrachtgever</th>
+        <th>MSP-fit</th>
         <th>Score</th>
         <th>Vereisten <span class="req-info" title="Verwachte vereisten op basis van opdrachtgevertype en regelgeving. Check altijd de aanbestedingsstukken voor de definitieve eisen.">i</span></th>
         <th>Type</th>
@@ -457,7 +470,7 @@ async def dashboard():
       </tr>
     </thead>
     <tbody id="tenderBody">
-      <tr><td colspan="8" class="empty">Tenders laden...</td></tr>
+      <tr><td colspan="9" class="empty">Tenders laden...</td></tr>
     </tbody>
   </table>
   </div>
@@ -473,6 +486,12 @@ const SEG_CSS = {
 };
 const CERT_CSS = { security: 'cert-security', quality: 'cert-quality', social: 'cert-social', other: 'cert-other' };
 
+function mspClass(level) {
+  if (level === 'MSP-relevant') return 'msp-relevant';
+  if (level === 'Mogelijk relevant') return 'msp-mogelijk';
+  return 'msp-niet';
+}
+
 function segClass(label) {
   for (const [key, cls] of Object.entries(SEG_CSS)) {
     if (label.toLowerCase().includes(key.toLowerCase())) return cls;
@@ -481,20 +500,36 @@ function segClass(label) {
 }
 
 let allTenders = [];
+let sortByMspFit = true;
+
+function sortTenders() {
+  if (sortByMspFit) {
+    allTenders.sort((a, b) => b.msp_fit_score - a.msp_fit_score || b.relevance_score - a.relevance_score);
+  } else {
+    allTenders.sort((a, b) => b.relevance_score - a.relevance_score || b.msp_fit_score - a.msp_fit_score);
+  }
+}
+
+function toggleSort() {
+  sortByMspFit = !sortByMspFit;
+  document.getElementById('sortToggle').textContent = sortByMspFit ? 'Sorteer: MSP-fit' : 'Sorteer: Relevantie';
+  sortTenders();
+  renderTable();
+}
 
 async function loadTenders() {
   try {
     const res = await fetch('/api/v1/tenders?limit=500');
     if (!res.ok) throw new Error(res.statusText);
     allTenders = await res.json();
-    allTenders.sort((a, b) => b.relevance_score - a.relevance_score);
+    sortTenders();
     updateStats();
     renderTable();
     document.getElementById('lastUpdate').textContent =
       'Laatste update: ' + new Date().toLocaleString('nl-NL');
   } catch (e) {
     document.getElementById('tenderBody').innerHTML =
-      '<tr><td colspan="8" class="empty">Fout bij laden: ' + e.message + '</td></tr>';
+      '<tr><td colspan="9" class="empty">Fout bij laden: ' + e.message + '</td></tr>';
   }
 }
 
@@ -552,7 +587,7 @@ function renderTable() {
 
   if (filtered.length === 0) {
     document.getElementById('tenderBody').innerHTML =
-      '<tr><td colspan="8" class="empty">Geen tenders gevonden voor dit filter.</td></tr>';
+      '<tr><td colspan="9" class="empty">Geen tenders gevonden voor dit filter.</td></tr>';
     return;
   }
 
@@ -572,6 +607,7 @@ function renderTable() {
       '<td><div class="tender-naam">' + escHtml(t.naam) + '</div>' + (kws ? '<div class="tags">' + kws + '</div>' : '') + '</td>' +
       '<td><div class="tags">' + (segs || '\\u2014') + '</div></td>' +
       '<td class="tender-opdrachtgever">' + escHtml(t.opdrachtgever) + '</td>' +
+      '<td><span class="badge ' + mspClass(t.msp_fit_level) + '">' + escHtml(t.msp_fit_level) + '</span><div class="meta" style="margin-top:2px">' + (t.msp_fit_score || 0) + ' pt</div></td>' +
       '<td><div class="score-bar score-' + lvl + '">' +
         '<span class="score-num">' + score + '</span>' +
         '<div class="score-fill" style="width:' + score + 'px;"></div>' +

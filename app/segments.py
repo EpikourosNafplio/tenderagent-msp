@@ -4,72 +4,75 @@ import re
 from typing import List, Dict
 
 # ── MSP Segments ─────────────────────────────────────────────────────────
+# Each segment has STRONG keywords (sufficient alone) and CPV codes.
+# WEAK keywords only trigger a segment if combined with a strong keyword
+# or a matching CPV code.
 
 SEGMENTS = {
     "Werkplek & Eindgebruikersbeheer": {
-        "cpv_requires_keyword": True,
-        "cpv": ["30200000", "30210000", "30230000", "48000000"],
-        "keywords": [
-            "werkplek", "werkplekbeheer", "desktop", "laptop",
-            "modern workplace", "microsoft 365", "m365", "office 365",
-            "telefonie", "servicedesk", "endpoint", "itsm",
-            "printbeheer", "client management",
-            "print", "printer", "multifunctional", "mfp", "repro",
-            "kantoorautomatisering", "dwr", "digitale werkomgeving",
+        "cpv": ["30200000", "30210000", "30230000"],
+        "strong": [
+            "werkplekbeheer", "workplace management", "endpoint management",
+            "dwr", "digitale werkomgeving", "printbeheer", "printer",
+            "multifunctional", "mfp", "repro", "kantoorautomatisering",
+            "desktop beheer", "modern workplace", "microsoft 365", "m365",
+            "office 365",
         ],
+        "weak": ["werkplek", "desktop", "laptop", "print", "endpoint",
+                 "servicedesk", "telefonie"],
     },
     "Cloud & Hosting": {
-        "cpv_requires_keyword": True,
-        "cpv": ["72400000", "72410000", "72300000"],
-        "keywords": [
-            "cloud", "hosting", "iaas", "paas", "saas", "azure", "aws",
-            "migratie", "hybride cloud", "datacenter", "virtualisatie",
-            "vmware", "containerisatie",
-            "as a service", "online platform", "webapplicatie",
+        "cpv": ["72400000", "72410000"],
+        "strong": [
+            "hosting", "iaas", "paas", "cloudmigratie", "vmware",
+            "virtualisatie", "compute", "storage", "backup", "datacenter",
+            "azure", "aws", "containerisatie", "hybride cloud",
         ],
+        "weak": ["cloud", "saas", "as a service", "online platform",
+                 "webapplicatie", "migratie"],
     },
     "Cybersecurity": {
-        "cpv_requires_keyword": True,
-        "cpv": ["48730000", "72200000"],
-        "keywords": [
-            "security", "cybersecurity", "informatiebeveiliging",
-            "soc", "siem", "soar", "penetratietest", "pentest",
-            "vulnerability", "bio", "nis2", "dora",
-            "dreigingsanalyse", "incident response",
-            "toegangscontrole", "access control", "identity", "iam",
-            "authenticatie", "autorisatie", "beveiligingssysteem",
+        "cpv": ["48730000"],
+        "strong": [
+            "soc", "siem", "penetratietest", "pentest",
+            "vulnerability scan", "vulnerability assessment",
+            "informatiebeveiliging", "cybersecurity",
+            "security operations", "soar", "dreigingsanalyse",
+            "incident response",
         ],
+        "weak": ["security", "beveiliging", "toegangscontrole",
+                 "access control", "identity", "iam", "authenticatie",
+                 "autorisatie"],
     },
     "Netwerk & Connectiviteit": {
-        "cpv_requires_keyword": False,
         "cpv": ["64200000", "32400000", "32420000"],
-        "keywords": [
-            "netwerk", "lan", "wan", "sd-wan", "firewall",
-            "connectiviteit", "telecom", "vpn", "switching",
-            "routing", "wifi", "wlan",
+        "strong": [
+            "sd-wan", "lan", "wan", "firewall", "connectiviteit",
+            "glasvezel", "wifi", "wlan", "switching", "routing",
+            "vpn",
         ],
+        "weak": ["netwerk", "telecom"],
     },
     "Applicatiebeheer": {
-        "cpv_requires_keyword": True,
-        "cpv": ["72200000", "72260000", "48000000"],
-        "keywords": [
-            "applicatiebeheer", "softwareimplementatie", "erp", "crm",
-            "zaaksysteem", "dms", "integratie", "api",
-            "maatwerk software", "platform", "portaal",
-            "systeem", "applicatie", "hrm", "salarisadministratie",
-            "klantvolgsysteem", "cms", "toegangscontrole",
-            "itsm", "servicemanagement", "ticketing",
-            "document management", "informatiebeheer",
+        "cpv": ["72260000"],
+        "strong": [
+            "applicatiebeheer", "softwareimplementatie", "zaaksysteem",
+            "servicemanagement", "itsm", "erp-implementatie",
+            "crm-implementatie", "document management",
         ],
+        "weak": ["systeem", "applicatie", "platform", "portaal",
+                 "software", "erp", "crm", "hrm", "dms", "cms",
+                 "ticketing", "informatiebeheer", "klantvolgsysteem",
+                 "salarisadministratie"],
     },
     "Data & BI": {
-        "cpv_requires_keyword": False,
-        "cpv": ["72300000", "48600000"],
-        "keywords": [
-            "data", "bi", "business intelligence", "dashboard",
-            "analytics", "datawarehouse", "datafundament",
-            "data-integratie", "rapportage", "power bi", "tableau",
+        "cpv": ["48600000"],
+        "strong": [
+            "datawarehouse", "business intelligence", "power bi",
+            "tableau", "datafundament", "data-integratie", "etl",
+            "analytics", "rapportage",
         ],
+        "weak": ["data", "bi", "dashboard", "digitaal"],
     },
 }
 
@@ -77,8 +80,8 @@ FULL_SERVICE_LABEL = "Full-service"
 FULL_SERVICE_THRESHOLD = 3
 
 
-def _text_has_keyword(text: str, keywords: list) -> bool:
-    """Check if any keyword appears in text as a substring (case-insensitive)."""
+def _text_has_any(text: str, keywords: list) -> bool:
+    """Check if any keyword appears in text as substring (case-insensitive)."""
     text_lower = text.lower()
     for kw in keywords:
         if kw.lower() in text_lower:
@@ -100,27 +103,123 @@ def _cpv_matches(tender_cpv_codes: list, segment_cpv_prefixes: list) -> bool:
 def detect_segments(naam: str, beschrijving: str, cpv_codes: list) -> List[str]:
     """Detect which MSP segments a tender belongs to.
 
-    Uses substring matching for keywords and prefix matching for CPV codes.
-    Returns list of segment labels.
+    Strong keywords or CPV codes alone assign a segment.
+    Weak keywords only assign a segment when combined with a strong keyword
+    or a matching CPV code for that segment.
     """
     text = f"{naam} {beschrijving}"
     matched = []
 
     for label, config in SEGMENTS.items():
-        has_keyword = _text_has_keyword(text, config["keywords"])
+        has_strong = _text_has_any(text, config["strong"])
+        has_weak = _text_has_any(text, config["weak"])
         has_cpv = _cpv_matches(cpv_codes, config["cpv"])
 
-        if has_keyword:
+        if has_strong or has_cpv:
             matched.append(label)
-        elif has_cpv and not config["cpv_requires_keyword"]:
+        elif has_weak and has_cpv:
             matched.append(label)
-        elif has_cpv and has_keyword:
-            matched.append(label)
+        # weak-only: no segment assigned
 
     if len(matched) >= FULL_SERVICE_THRESHOLD:
         matched.append(FULL_SERVICE_LABEL)
 
     return matched
+
+
+# ── MSP-fit Scoring ──────────────────────────────────────────────────────
+
+# IT infrastructure scope — core MSP territory
+_MSP_INFRA = [
+    "compute", "storage", "backup", "datacenter", "werkplekbeheer",
+    "endpoint management", "sd-wan", "firewall", "connectiviteit",
+    "dwr", "digitale werkomgeving", "cloudmigratie",
+]
+
+# Managed services context — ongoing operations, not one-time delivery
+_MSP_MANAGED = [
+    "beheer en onderhoud", "managed service", "hosting en beheer",
+    "monitoring", "as a service",
+]
+
+# Software product delivery — buying/implementing a specific system
+_SOFTWARE_DELIVERY = [
+    "erp", "hrm", "e-hrm", "salarisverwerking", "salarisadministratie",
+    "salaris-", "financieel systeem", "financieel pakket",
+    "woz applicatie", "woz-applicatie", "woz waardering",
+    "zaaksysteem", "klantvolgsysteem", "promotie volgsysteem",
+    "financieel applicatie",
+]
+
+# Physical/civil infrastructure — not IT managed services
+_PHYSICAL_INFRA = [
+    "glasvezel", "civiel", "toegangscontrole", "fysieke beveiliging",
+    "meettrein", "voertuigvolg", "audiovisuele middelen",
+    "touchscreen", "reizigerstrein", "beeldmateriaal",
+    "telsysteem", "laboratorium",
+]
+
+# Niche vendor-specific software requiring specific vendor
+_NICHE_SOFTWARE = [
+    "arcgis", "safe exam", "splunk licentie", "epic connect",
+    "afas", "exact online", "cris",
+]
+
+# Primary MSP client categories
+_MSP_CLIENT_TYPES = {"GEMEENTE", "PROVINCIE", "WATERSCHAP", "GR"}
+
+
+def score_msp_fit(
+    tender_naam: str,
+    beschrijving: str,
+    type_opdracht: str,
+    opdrachtgever_type: str,
+    segments: List[str],
+) -> Dict:
+    """Score how well a tender fits an MSP's service portfolio.
+
+    Returns dict with keys: score, level.
+    Level: 'MSP-relevant' (>20), 'Mogelijk relevant' (0-20), 'Niet MSP' (<0).
+    """
+    text = f"{tender_naam} {beschrijving}".lower()
+    score = 0
+
+    # +10 for services (MSP's deliver services, not products)
+    if type_opdracht and "diensten" in type_opdracht.lower():
+        score += 10
+
+    # +15 for IT infrastructure scope (core MSP territory)
+    if _text_has_any(text, _MSP_INFRA):
+        score += 15
+
+    # +15 for managed services context
+    if _text_has_any(text, _MSP_MANAGED):
+        score += 15
+
+    # +10 for primary MSP clients
+    if opdrachtgever_type in _MSP_CLIENT_TYPES:
+        score += 10
+
+    # -25 for software product delivery
+    if _text_has_any(text, _SOFTWARE_DELIVERY):
+        score -= 25
+
+    # -25 for physical/civil infrastructure
+    if _text_has_any(text, _PHYSICAL_INFRA):
+        score -= 25
+
+    # -25 for niche vendor-specific software
+    if _text_has_any(text, _NICHE_SOFTWARE):
+        score -= 25
+
+    if score > 20:
+        level = "MSP-relevant"
+    elif score >= 0:
+        level = "Mogelijk relevant"
+    else:
+        level = "Niet MSP"
+
+    return {"score": score, "level": level}
 
 
 # ── Certification Detection ──────────────────────────────────────────────
