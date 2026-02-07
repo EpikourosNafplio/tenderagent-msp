@@ -131,6 +131,16 @@ def _format_tender(raw: dict) -> TenderSummary:
     )
 
 
+def _deduplicate(tenders: list) -> list:
+    """Deduplicate tenders by naam + opdrachtgever, keeping highest score."""
+    seen: dict = {}
+    for t in tenders:
+        key = (t.naam.lower().strip(), t.opdrachtgever.lower().strip())
+        if key not in seen or t.relevance_score > seen[key].relevance_score:
+            seen[key] = t
+    return list(seen.values())
+
+
 async def _ensure_cache() -> str:
     """Refresh cache if stale. Returns source label."""
     if is_cache_fresh():
@@ -152,7 +162,7 @@ async def discover(
     """Discover IT/MSP tenders — fetches fresh data if cache is stale."""
     source = await _ensure_cache()
     raw_tenders = get_all_tenders()
-    tenders = [_format_tender(t) for t in raw_tenders]
+    tenders = _deduplicate([_format_tender(t) for t in raw_tenders])
 
     if min_score > 0:
         tenders = [t for t in tenders if t.relevance_score >= min_score]
@@ -181,7 +191,7 @@ async def list_tenders(
     """List cached tenders with filtering and pagination."""
     await _ensure_cache()
     raw = get_all_tenders()
-    tenders = [_format_tender(t) for t in raw]
+    tenders = _deduplicate([_format_tender(t) for t in raw])
 
     if min_score > 0:
         tenders = [t for t in tenders if t.relevance_score >= min_score]
@@ -338,7 +348,14 @@ async def dashboard():
   <div class="stats-bar" id="statsBar"></div>
 
   <div class="controls">
-    <label for="filterLevel">Filter:</label>
+    <label for="filterStatus">Status:</label>
+    <select id="filterStatus" onchange="renderTable()">
+      <option value="open" selected>Open tenders</option>
+      <option value="marktconsultatie">Marktconsultaties</option>
+      <option value="gegund">Gegund</option>
+      <option value="alles">Alles</option>
+    </select>
+    <label for="filterLevel">Relevantie:</label>
     <select id="filterLevel" onchange="renderTable()">
       <option value="">Alle niveaus</option>
       <option value="hoog">Hoog</option>
@@ -405,13 +422,32 @@ function updateStats() {
     '<div class="stat-card stat-laag"><div class="num">' + counts.laag + '</div><div class="label">Laag</div></div>';
 }
 
+function isGegund(t) {
+  const tp = (t.type_publicatie || '').toLowerCase();
+  return tp.includes('gegunde') || tp.includes('beëindiging') || tp.includes('beeindiging');
+}
+
+function isMarktconsultatie(t) {
+  return (t.procedure || '').toLowerCase().includes('marktconsultatie');
+}
+
+function isOpen(t) {
+  if (isGegund(t) || isMarktconsultatie(t)) return false;
+  if (!t.sluitings_datum) return false;
+  return new Date(t.sluitings_datum) >= new Date(new Date().toDateString());
+}
+
 function renderTable() {
+  const statusFilter = document.getElementById('filterStatus').value;
   const levelFilter = document.getElementById('filterLevel').value;
   const typeFilter = document.getElementById('filterType').value;
   const search = document.getElementById('searchBox').value.toLowerCase();
   const levels = levelFilter ? levelFilter.split(',') : [];
 
   let filtered = allTenders.filter(t => {
+    if (statusFilter === 'open' && !isOpen(t)) return false;
+    if (statusFilter === 'marktconsultatie' && !isMarktconsultatie(t)) return false;
+    if (statusFilter === 'gegund' && !isGegund(t)) return false;
     if (levels.length && !levels.includes(t.relevance_level)) return false;
     if (typeFilter && (!t.type_opdracht || !t.type_opdracht.toLowerCase().includes(typeFilter.toLowerCase()))) return false;
     if (search && !t.naam.toLowerCase().includes(search) && !t.opdrachtgever.toLowerCase().includes(search)) return false;
