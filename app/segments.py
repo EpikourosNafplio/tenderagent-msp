@@ -166,6 +166,148 @@ IMPLIED_CERTIFICATIONS = [
 ]
 
 
+# ── Opdrachtgever Classification & Expected Requirements ─────────────
+
+OPDRACHTGEVER_RULES = [
+    # Order matters: more specific matches first
+    ("RIJK_VITAAL", ["rijkswaterstaat", "prorail"]),
+    ("GR", ["gemeenschappelijke regeling", "gemeenschappelijk regeling", "samenwerkingsverband"]),
+    ("ZORG", ["ziekenhuis", "ggz", "ggd", "zorggroep", "huisartsen",
+              "medisch centrum", "umc "]),
+    ("RIJK", ["ministerie", "politie", "raad van state", "hoge raad",
+              "eerste kamer", "tweede kamer", "rekenkamer"]),
+    ("ZBO", ["uwv", "svb", "duo", "belastingdienst", "rivm", "rvo",
+             "rdw", "dienst wegverkeer", "kadaster", "knmi", "cbs",
+             "autoriteit persoonsgegevens"]),
+    ("WATERSCHAP", ["waterschap", "hoogheemraadschap", "wetterskip"]),
+    ("GEMEENTE", ["gemeente"]),
+    ("PROVINCIE", ["provincie"]),
+    ("ONDERWIJS", ["universiteit", "hogeschool", " roc ", "lyceum", "scholengemeenschap"]),
+    ("PUBLIEK_SOCIAAL", ["emco", "sociale werkvoorziening", "sw-bedrijf"]),
+]
+
+# "rws" checked separately to avoid matching inside other words
+_RWS_PATTERN = re.compile(r"(?i)\bRWS\b")
+# "stichting ... onderwijs" combination
+_STICHTING_ONDERWIJS = re.compile(r"(?i)stichting.*onderwijs|onderwijs.*stichting")
+# "GR " prefix (e.g. "GR Drechtsteden")
+_GR_PREFIX = re.compile(r"(?i)\bGR\s+[A-Z]")
+
+# Level priority: verplicht > waarschijnlijk > gebruikelijk > mogelijk
+LEVEL_PRIORITY = {"verplicht": 4, "waarschijnlijk": 3, "gebruikelijk": 2, "mogelijk": 1}
+
+EXPECTED_REQUIREMENTS: Dict[str, List[Dict]] = {
+    "GEMEENTE": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "SROI", "level": "gebruikelijk", "category": "social"},
+    ],
+    "PROVINCIE": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "SROI", "level": "gebruikelijk", "category": "social"},
+    ],
+    "WATERSCHAP": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "SROI", "level": "gebruikelijk", "category": "social"},
+    ],
+    "GR": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "SROI", "level": "gebruikelijk", "category": "social"},
+    ],
+    "RIJK": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "DigiD", "level": "mogelijk", "category": "security"},
+        {"name": "ISAE 3402", "level": "mogelijk", "category": "quality"},
+    ],
+    "ZBO": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "DigiD", "level": "mogelijk", "category": "security"},
+        {"name": "ISAE 3402", "level": "mogelijk", "category": "quality"},
+    ],
+    "RIJK_VITAAL": [
+        {"name": "BIO", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "ISAE 3402", "level": "waarschijnlijk", "category": "quality"},
+        {"name": "NIS2", "level": "waarschijnlijk", "category": "security"},
+    ],
+    "ZORG": [
+        {"name": "NEN 7510", "level": "verplicht", "category": "security"},
+        {"name": "ISO 27001", "level": "waarschijnlijk", "category": "security"},
+        {"name": "BIO", "level": "mogelijk", "category": "security"},
+    ],
+    "ONDERWIJS": [
+        {"name": "ISO 27001", "level": "mogelijk", "category": "security"},
+        {"name": "AVG/DPIA", "level": "waarschijnlijk", "category": "security"},
+    ],
+    "PUBLIEK_SOCIAAL": [
+        {"name": "BIO", "level": "waarschijnlijk", "category": "security"},
+        {"name": "PSO", "level": "waarschijnlijk", "category": "social"},
+        {"name": "SROI", "level": "gebruikelijk", "category": "social"},
+    ],
+}
+
+
+def classify_opdrachtgever(opdrachtgever: str) -> str:
+    """Classify opdrachtgever into a category based on name."""
+    name_lower = opdrachtgever.lower()
+
+    # Special patterns
+    if _RWS_PATTERN.search(opdrachtgever):
+        return "RIJK_VITAAL"
+    if _GR_PREFIX.search(opdrachtgever):
+        return "GR"
+    if _STICHTING_ONDERWIJS.search(opdrachtgever):
+        return "ONDERWIJS"
+
+    for category, keywords in OPDRACHTGEVER_RULES:
+        for kw in keywords:
+            if kw.lower() in name_lower:
+                return category
+
+    return "OVERIG"
+
+
+def get_expected_requirements(
+    opdrachtgever: str, segments: List[str]
+) -> List[Dict[str, str]]:
+    """Get expected certification requirements based on opdrachtgever type.
+
+    Returns list of dicts with keys: name, category, level.
+    Level is one of: verplicht, waarschijnlijk, gebruikelijk, mogelijk.
+    """
+    category = classify_opdrachtgever(opdrachtgever)
+    reqs = EXPECTED_REQUIREMENTS.get(category, [])
+
+    # Build result with deduplication by name (keep highest level)
+    result: Dict[str, Dict] = {}
+    for req in reqs:
+        result[req["name"]] = {
+            "name": req["name"],
+            "category": req["category"],
+            "level": req["level"],
+        }
+
+    # Cybersecurity segment upgrade: ISO 27001 → waarschijnlijk
+    if "Cybersecurity" in segments:
+        if "ISO 27001" in result:
+            current = LEVEL_PRIORITY.get(result["ISO 27001"]["level"], 0)
+            if current < LEVEL_PRIORITY["waarschijnlijk"]:
+                result["ISO 27001"]["level"] = "waarschijnlijk"
+        elif category != "OVERIG":
+            result["ISO 27001"] = {
+                "name": "ISO 27001",
+                "category": "security",
+                "level": "waarschijnlijk",
+            }
+
+    return list(result.values())
+
+
 def detect_certifications(naam: str, beschrijving: str) -> List[Dict[str, str]]:
     """Detect certification requirements mentioned in a tender.
 

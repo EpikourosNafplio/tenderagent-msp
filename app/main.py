@@ -19,7 +19,12 @@ from .database import (
     upsert_tenders,
 )
 from .scoring import score_tender
-from .segments import detect_certifications, detect_segments
+from .segments import (
+    classify_opdrachtgever,
+    detect_certifications,
+    detect_segments,
+    get_expected_requirements,
+)
 from .tenderned import discover_it_tenders, fetch_detail
 
 logging.basicConfig(level=logging.INFO)
@@ -65,6 +70,8 @@ class TenderSummary(BaseModel):
     matched_keywords: List[str] = []
     segments: List[str] = []
     certifications: List[Dict] = []
+    opdrachtgever_type: str = "OVERIG"
+    expected_requirements: List[Dict] = []
     link: Optional[str] = None
 
 
@@ -117,11 +124,14 @@ def _format_tender(raw: dict) -> TenderSummary:
 
     segments = detect_segments(naam, beschrijving, cpv_codes)
     certifications = detect_certifications(naam, beschrijving)
+    opdrachtgever_naam = raw.get("opdrachtgeverNaam", "")
+    og_type = classify_opdrachtgever(opdrachtgever_naam)
+    expected_reqs = get_expected_requirements(opdrachtgever_naam, segments)
 
     return TenderSummary(
         publicatie_id=str(raw.get("publicatieId", "")),
         naam=naam,
-        opdrachtgever=raw.get("opdrachtgeverNaam", ""),
+        opdrachtgever=opdrachtgever_naam,
         publicatie_datum=raw.get("publicatieDatum"),
         sluitings_datum=raw.get("sluitingsDatum"),
         type_publicatie=type_pub,
@@ -135,6 +145,8 @@ def _format_tender(raw: dict) -> TenderSummary:
         matched_keywords=scoring["matched_keywords"],
         segments=segments,
         certifications=certifications,
+        opdrachtgever_type=og_type,
+        expected_requirements=expected_reqs,
         link=link,
     )
 
@@ -307,7 +319,11 @@ async def dashboard():
   .cert-social { background: #d1fae5; color: #065f46; }
   .cert-other { background: #f1f5f9; color: #475569; }
   .cert-implied { opacity: 0.65; font-style: italic; }
-  .cert-nb { color: #c0c7d0; font-size: 0.78rem; cursor: help; }
+  /* Expected requirement levels */
+  .req-verplicht { font-weight: 700; }
+  .req-waarschijnlijk { opacity: 0.85; }
+  .req-gebruikelijk, .req-mogelijk { opacity: 0.6; border: 1px solid currentColor; background: transparent !important; }
+  .req-info { display: inline-block; width: 15px; height: 15px; border-radius: 50%; background: #e2e8f0; color: #64748b; font-size: 0.65rem; text-align: center; line-height: 15px; cursor: help; margin-left: 4px; vertical-align: middle; }
   .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
   .controls label { font-size: 0.82rem; font-weight: 500; color: #475569; }
   select, input[type="text"] { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.82rem; background: #fff; color: #1e293b; }
@@ -412,6 +428,8 @@ async def dashboard():
       <option value="NIS2">NIS2</option>
       <option value="PSO">PSO</option>
       <option value="SROI">SROI</option>
+      <option value="AVG/DPIA">AVG/DPIA</option>
+      <option value="ISAE 3402">ISAE 3402</option>
     </select>
     <label for="filterType">Type:</label>
     <select id="filterType" onchange="renderTable()">
@@ -432,7 +450,7 @@ async def dashboard():
         <th>Segmenten</th>
         <th>Opdrachtgever</th>
         <th>Score</th>
-        <th>Vereisten</th>
+        <th>Vereisten <span class="req-info" title="Verwachte vereisten op basis van opdrachtgevertype en regelgeving. Check altijd de aanbestedingsstukken voor de definitieve eisen.">i</span></th>
         <th>Type</th>
         <th>Sluitingsdatum</th>
         <th>Link</th>
@@ -520,7 +538,11 @@ function renderTable() {
     if (statusFilter === 'gegund' && !isGegund(t)) return false;
     if (levels.length && !levels.includes(t.relevance_level)) return false;
     if (segFilter && !(t.segments || []).some(s => s.toLowerCase().includes(segFilter.toLowerCase()))) return false;
-    if (certFilter && !(t.certifications || []).some(c => c.name === certFilter)) return false;
+    if (certFilter) {
+      const hasCert = (t.certifications || []).some(c => c.name === certFilter);
+      const hasExpected = (t.expected_requirements || []).some(r => r.name === certFilter);
+      if (!hasCert && !hasExpected) return false;
+    }
     if (typeFilter && (!t.type_opdracht || !t.type_opdracht.toLowerCase().includes(typeFilter.toLowerCase()))) return false;
     if (search && !t.naam.toLowerCase().includes(search) && !t.opdrachtgever.toLowerCase().includes(search)) return false;
     return true;
@@ -542,7 +564,9 @@ function renderTable() {
       ? '<a class="link-ext" href="' + escHtml(t.link) + '" target="_blank" rel="noopener">Bekijk &#8599;</a>'
       : '\\u2014';
     const segs = (t.segments || []).map(s => '<span class="badge ' + segClass(s) + '">' + escHtml(s) + '</span>').join(' ');
-    const certs = (t.certifications || []).map(c => '<span class="badge ' + (CERT_CSS[c.category] || 'cert-other') + (c.implied ? ' cert-implied' : '') + '">' + escHtml(c.name) + '</span>').join(' ');
+    const explicitCerts = (t.certifications || []).map(c => '<span class="badge ' + (CERT_CSS[c.category] || 'cert-other') + (c.implied ? ' cert-implied' : '') + '">' + escHtml(c.name) + '</span>');
+    const expectedReqs = (t.expected_requirements || []).map(r => '<span class="badge ' + (CERT_CSS[r.category] || 'cert-other') + ' req-' + r.level + '" title="' + escHtml(r.level) + '">' + escHtml(r.name) + '</span>');
+    const certs = explicitCerts.concat(expectedReqs).join(' ');
     const kws = (t.matched_keywords || []).slice(0, 4).map(k => '<span class="kw">' + escHtml(k) + '</span>').join('');
     return '<tr class="row-' + lvl + '">' +
       '<td><div class="tender-naam">' + escHtml(t.naam) + '</div>' + (kws ? '<div class="tags">' + kws + '</div>' : '') + '</td>' +
@@ -552,7 +576,7 @@ function renderTable() {
         '<span class="score-num">' + score + '</span>' +
         '<div class="score-fill" style="width:' + score + 'px;"></div>' +
       '</div><span class="badge badge-' + lvl + '">' + lvl + '</span></td>' +
-      '<td><div class="certs">' + (certs || '<span class="cert-nb" title="Certificeringen staan meestal in de aanbestedingsdocumenten. Check de stukken op TenderNed.">n.b.</span>') + '</div></td>' +
+      '<td><div class="certs">' + (certs || '') + '</div></td>' +
       '<td>' + escHtml(t.type_opdracht || '\\u2014') + '</td>' +
       '<td>' + datum + '</td>' +
       '<td>' + link + '</td>' +
