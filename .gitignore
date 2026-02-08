@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
-cache.db
-cache.db-shm
-cache.db-wal
+*.pyo
 .env
+.venv/
 data/tenderned_historie.db
+*.db
+.DS_Store

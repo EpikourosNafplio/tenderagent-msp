@@ -1,79 +1,129 @@
-# TenderAgent MSP
+# TenderAgent MSP v2.5
 
-FastAPI applicatie voor het automatisch ontdekken van Nederlandse IT-aanbestedingen die relevant zijn voor Managed Service Providers (MSP's).
-
-Haalt live data op van de [TenderNed API](https://www.tenderned.nl), filtert op 36 IT/MSP-relevante CPV-codes, en scoort tenders op relevantie via keyword matching en CPV-code analyse.
+AI-gestuurde API voor IT-aanbestedingen in Nederland, specifiek voor Managed Service Providers (25-100 FTE).
 
 ## Features
 
-- **Live TenderNed data** — haalt 200 recente publicaties op (10 pagina's)
-- **CPV-code filtering** — 36 IT-relevante codes (72xxx, 48xxx, 302xx, 642xx)
-- **Relevantie-scoring** — keyword matching (hoog/midden/laag) + CPV-bonus (+25 punten)
-- **SQLite cache** — 30 minuten TTL, handmatig te verversen
-- **REST API** — JSON endpoints met filtering en paginering
+**Core (werkt zonder dataset):**
+- 7 MSP-segmenten met sterke/zwakke keyword-matching
+- Opdrachtgever-classificatie (gemeente, GR, zorg, onderwijs, etc.)
+- Afgeleide certificeringsvereisten per opdrachtgevertype (BIO, ISO 27001, NEN 7510, etc.)
+- MSP-fit scoring (filtert applicatiesoftware vs. managed services)
+- Geschatte opdrachtwaarde (bandbreedte op basis van opdrachtgevertype + scope)
+- Spanning-detectie (disproportionele eisen, opvallende combinaties, MSP-kansen)
 
-## Quickstart
+**Dataset-features (vereist TenderNed openbare dataset):**
+- Gunningshistorie per opdrachtgever (wie won eerder, hoeveel inschrijvingen, geraamde waarde)
+- Herhalingspatronen (contracten die aflopen, verwachte heraanbestedingen)
+- Vooraankondigingen en marktconsultaties (wat komt eraan)
 
-```bash
-pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-Open http://localhost:8000/docs voor de Swagger UI.
-
-## Docker
+## Installatie
 
 ```bash
-docker build -t tenderagent-msp .
-docker run -p 8000:8000 tenderagent-msp
+pip3 install -r requirements.txt
 ```
+
+## Gebruik
+
+### Stap 1: Start de API (werkt direct)
+
+```bash
+python3 main.py
+```
+
+Dashboard: http://localhost:8000
+
+### Stap 2: Laad de TenderNed dataset (optioneel maar aanbevolen)
+
+Download de dataset van https://www.tenderned.nl/cms/nl/aanbesteden-in-cijfers/datasets-aanbestedingen
+
+```bash
+# Excel (alle jaren in een bestand)
+python3 import_dataset.py /pad/naar/tenderned_2016_2025.xlsx
+
+# JSON (per jaar, meerdere bestanden)
+python3 import_dataset.py /pad/naar/2024.json /pad/naar/2025.json
+```
+
+Het script maakt een SQLite database aan in `data/tenderned_historie.db`.
+Herstart de API om de data te gebruiken.
 
 ## API Endpoints
 
-| Methode | Endpoint | Beschrijving |
-|---------|----------|--------------|
-| GET | `/api/v1/discover` | Ontdek IT-tenders (ververst cache indien nodig) |
-| GET | `/api/v1/tenders` | Lijst met filtering en paginering |
-| GET | `/api/v1/tenders/{id}` | Enkele tender op publicatie-ID |
-| GET | `/api/v1/stats` | Statistieken per relevantie, type en procedure |
-| GET | `/api/v1/cpv-codes` | Alle 36 IT/MSP CPV-codes |
-| POST | `/api/v1/refresh` | Forceer cache-verversing |
+| Endpoint | Beschrijving |
+|----------|-------------|
+| GET /api/v1/discover | Overzicht van alle endpoints |
+| GET /api/v1/tenders | Actuele tenders met MSP-analyse |
+| GET /api/v1/tenders/{id} | Tender detail |
+| GET /api/v1/stats | Statistieken |
+| GET /api/v1/cpv-codes | Gemonitorde CPV-codes |
+| GET /api/v1/gunningshistorie/{opdrachtgever} | Gunningshistorie (dataset vereist) |
+| GET /api/v1/vooraankondigingen | Vooraankondigingen (dataset vereist) |
+| GET /api/v1/herhalingspatronen | Verwachte heraanbestedingen (dataset vereist) |
 
-### Query parameters
+### Filteropties /api/v1/tenders
 
-**`/api/v1/discover`** en **`/api/v1/tenders`**:
-- `min_score` — minimale relevantiescore (0-100)
-- `level` — filter op `hoog`, `midden` of `laag`
+- `min_score` - Minimale IT-relevantiescore (0-100)
+- `min_msp_fit` - Minimale MSP-fit score
+- `msp_label` - Filter: relevant, mogelijk, niet
+- `segment` - Filter op MSP-segment (bijv. "werkplek", "cloud")
+- `alleen_open` - Alleen tenders met openstaande sluitingsdatum
+- `alleen_signalen` - Alleen tenders met spanning-signalen
+- `sorteer` - Sorteer op: msp_fit (default), relevantie, waarde, signalen
 
-**`/api/v1/tenders`** (extra):
-- `type_opdracht` — `Diensten`, `Leveringen` of `Werken`
-- `limit` — aantal resultaten (default 50, max 500)
-- `offset` — paginering offset
+### Voorbeelden
 
-## Relevantie-scoring
+```bash
+# MSP-relevante tenders, gesorteerd op fit
+curl "http://localhost:8000/api/v1/tenders?msp_label=relevant"
 
-Elke tender krijgt een score op basis van:
+# Tenders met spanning-signalen (TvdW-kandidaten)
+curl "http://localhost:8000/api/v1/tenders?alleen_signalen=true&sorteer=signalen"
 
-| Component | Punten |
-|-----------|--------|
-| Hoog-relevantie keyword (bijv. SaaS, cybersecurity, inhuur) | +15 per match |
-| Midden-relevantie keyword (bijv. software, implementatie) | +5 per match |
-| IT-relevante CPV-code (72/48/302/642) | +25 bonus |
-| Negatief keyword (bijv. bouw, medisch, transport) | -10 per match |
+# Cloud-tenders bij overheid
+curl "http://localhost:8000/api/v1/tenders?segment=cloud&msp_label=relevant"
 
-**Niveaus:** hoog (50+), midden (20-49), laag (0-19)
+# Gunningshistorie gemeente Amersfoort
+curl "http://localhost:8000/api/v1/gunningshistorie/Amersfoort"
+
+# Verwachte heraanbestedingen
+curl "http://localhost:8000/api/v1/herhalingspatronen"
+```
+
+## MSP-segmenten
+
+| Segment | Voorbeelden |
+|---------|-------------|
+| Werkplek & Eindgebruikersbeheer | Werkplekbeheer, Microsoft 365, servicedesk, endpoint management |
+| Cloud & Hosting | IaaS, PaaS, hosting, compute, storage, backup, VMware |
+| Cybersecurity & Informatiebeveiliging | SOC, SIEM, penetratietests, security monitoring |
+| Netwerk & Connectiviteit | SD-WAN, LAN/WAN, firewall, wifi, connectiviteit |
+| Applicatiebeheer & Implementatie | Zaaksystemen, ERP/CRM, softwareimplementatie |
+| Data & Business Intelligence | Datawarehouse, Power BI, analytics, ETL |
+| Full-service IT-partner | 3+ segmenten in een tender |
+
+## Spanning-signalen
+
+| Icoon | Type | Voorbeeld |
+|-------|------|-----------|
+| ⚠️ | Disproportioneel | Zware eisen voor kleine opdrachtgever |
+| 🧩 | Opvallend | Werkplek met security-focus, leverancierswisseling |
+| ✅ | MSP-kans | Sweet spot MSP, cloud bij overheid |
 
 ## Projectstructuur
 
 ```
 tenderagent-msp/
-├── app/
-│   ├── main.py          # FastAPI app en endpoints
-│   ├── tenderned.py     # TenderNed API client
-│   ├── cpv_codes.py     # 36 IT/MSP CPV-codes
-│   ├── scoring.py       # Relevantie-scoring engine
-│   └── database.py      # SQLite cache
-├── requirements.txt
-├── Dockerfile
-└── README.md
+  main.py              - FastAPI applicatie
+  import_dataset.py    - TenderNed dataset import
+  requirements.txt
+  data/
+    tenderned_historie.db  - SQLite (na import)
+  Dockerfile
+  docker-compose.yml
 ```
+
+## Gemaakt voor
+
+Epikouros Trading & Consulting Company
+https://github.com/martinvanleeuwen/tenderagent-msp
